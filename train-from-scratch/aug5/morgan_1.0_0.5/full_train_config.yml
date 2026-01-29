@@ -1,0 +1,74 @@
+data:
+  corpus_1:
+    path_src: datasets/USPTO_FULL/aug5/morgan/train/src-train.txt
+    path_tgt: datasets/USPTO_FULL/aug5/morgan/train/tgt-train.txt
+    path_ref: datasets/USPTO_FULL/aug5/morgan/train/ref-train.txt
+    path_sim: datasets/USPTO_FULL/aug5/morgan/train/sim-train.txt
+    path_frag: datasets/USPTO_FULL/aug5/morgan/train/frag-train.txt
+  valid:
+    path_src: datasets/USPTO_FULL/aug5/morgan/val/src-val.txt
+    path_tgt: datasets/USPTO_FULL/aug5/morgan/val/tgt-val.txt
+    path_ref: datasets/USPTO_FULL/aug5/morgan/val/ref-val.txt
+    path_sim: datasets/USPTO_FULL/aug5/morgan/val/sim-val.txt
+    path_frag: datasets/USPTO_FULL/aug5/morgan/val/frag-val.txt
+
+n_sample: 0
+save_data: datasets/USPTO_FULL/aug5/morgan/example
+src_vocab: datasets/USPTO_FULL/aug5/morgan/example.vocab-sim.src
+tgt_vocab: datasets/USPTO_FULL/aug5/morgan/example.vocab-sim.src
+ref_vocab: datasets/USPTO_FULL/aug5/morgan/example.vocab-sim.src
+frag_vocab: datasets/USPTO_FULL/aug5/morgan/example.vocab-sim.src
+share_vocab: 'true'
+src_seq_length: 1000
+tgt_seq_length: 1000
+ref_seq_length: 1000
+frag_seq_length: 1000
+overwrite: 'true'
+data_task: RetroDKR
+
+save_model: exp/USPTO_FULL/aug5/morgan_1.0_0.5/model.product-reactants
+save_checkpoint_steps: 10000 # 保存一次 checkpoint 的步数
+keep_checkpoint: 10 # 保存最新的模型个数
+seed: 3435
+train_steps: 1600000 # 总共训练步数
+valid_steps: 50000 # 训练中做一次验证的步数
+warmup_steps: 8000 # 学习率预热步数
+report_every: 5000 # 打印一次日志的步数
+
+# Model architecture
+model_task: RetroDKR           # Added
+encoder_type: transformer
+decoder_type: RetroDKR
+word_vec_size: 512
+rnn_size: 512
+layers: 6
+transformer_ff: 2048
+heads: 8
+
+accum_count: 2 # 4
+optim: adam
+adam_beta1: 0.9
+adam_beta2: 0.998
+decay_method: noam
+learning_rate: 2.0
+max_grad_norm: 0.0
+lambda1: 1.0
+lambda2: 1.0
+lambda3: 0.5
+
+batch_size: 6000 # 3000
+valid_batch_size: 6000 # 3000
+batch_type: tokens
+normalization: tokens
+dropout: 0.1
+label_smoothing: 0.0
+
+max_generator_batches: 0 #32 0会计算损失占用更多显存
+
+param_init: 0.0
+param_init_glorot: 'true'
+position_encoding: 'true'
+
+world_size: 1
+gpu_ranks:
+- 0

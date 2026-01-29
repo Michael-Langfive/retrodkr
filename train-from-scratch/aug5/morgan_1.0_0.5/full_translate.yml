@@ -1,0 +1,13 @@
+model: exp/USPTO_FULL/aug5/morgan_1.0_0.5/average_model_156-160.pt
+src: datasets/USPTO_FULL/aug5/morgan/test/src-test.txt
+ref: datasets/USPTO_FULL/aug5/morgan/test/ref-test.txt            # Added
+sim: datasets/USPTO_FULL/aug5/morgan/test/sim-test.txt            # Added
+frag: datasets/USPTO_FULL/aug5/morgan/test/frag-test.txt          # Added
+output: exp/USPTO_FULL/aug5/morgan_1.0_0.5/average_model_156-160-results.txt
+gpu: 0
+beam_size: 10
+n_best: 10
+batch_size: 32768 #8192 16384 32768 65536 131072 262144
+batch_type: tokens
+max_length: 1000
+seed: 0
