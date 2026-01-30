@@ -18,7 +18,7 @@ import selfies as sf
 import codecs
 from SmilesPE.tokenizer import *
 
-from preprocessing.generate_data import process_single_product, process_single_cano_product
+from generate_data import process_single_product, process_single_cano_product
 
 RDLogger.DisableLog('rdApp.*')
 
