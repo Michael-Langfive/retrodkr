@@ -64,13 +64,14 @@ def same_size(t1, t2, pad_idx):
     elif t1.size(1) < t2.size(1):
         pads = t1.new_full((t1.size(0), t2.size(1) - t1.size(1)), pad_idx)
         t1 = torch.cat([t1, pads], 1)
-    else:
+    else:  # 如果长度原本就相等，上面两个 if 没走的话，需要 clone 一下，避免后续修改影响到原始张量
         t1 = t1.clone()
         t2 = t2.clone()
     return (t1, t2)
 
 
-
+# === 1. 定义新的输出类 (扩充版 EncoderOut) ===
+# 它拥有原生 EncoderOut 的所有字段，加上你的新字段
 EditRetroEncoderOut = NamedTuple(
     "EditRetroEncoderOut",
     [
@@ -80,40 +81,55 @@ EditRetroEncoderOut = NamedTuple(
         ("encoder_states", Optional[List[Tensor]]),
         ("src_tokens", Optional[Tensor]),  # B x T
         ("src_lengths", Optional[Tensor]),  # B x 1
-        ("ref_out", Optional[Dict]),
-        ("frag_out", Optional[Dict]),
+
+        # === 新增字段 (默认为 None) ===
+        ("ref_out", Optional[Dict]),  # 存为字典，因为 Decoder 内部需要用 ['key'] 访问
+        ("frag_out", Optional[Dict]),  # 存为字典
     ],
 )
 
 
+# ===========================================================================
+# 1. 自定义 Encoder: 支持 Shared Encoding 和 Introspector (内省器)
+# ===========================================================================
 class EditRetroEncoder(FairseqNATEncoder):
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(args, dictionary, embed_tokens)
+        # 初始化 Introspector 输入维度是 embed_dim, 输出是 1 (scalar score)
         self.introspector = nn.Sequential(
             nn.Linear(args.encoder_embed_dim, 1),
             nn.Sigmoid()
         )
 
     def reorder_encoder_out(self, encoder_out, new_order):
+        """
+        在 Beam Search/Top-K 时，必须手动把 ref_out 和 frag_out 也复制 K 份。
+        """
+        # 1. 先让父类处理标准数据 (src_tokens 等)
         temp_out = super().reorder_encoder_out(encoder_out, new_order)
 
+        # 2. 手动复制 Ref 数据
         new_ref_out = None
         if encoder_out.ref_out is not None:
             ref_dict = encoder_out.ref_out
             new_ref_out = {}
 
+            # 复制 encoder_out (Seq x Batch x Dim) -> index_select(1, new_order)
             if 'encoder_out' in ref_dict and ref_dict['encoder_out'] is not None:
                 new_ref_out['encoder_out'] = ref_dict['encoder_out'].index_select(1, new_order)
 
+            # 复制 padding_mask (Batch x Seq) -> index_select(0, new_order)
             if 'encoder_padding_mask' in ref_dict and ref_dict['encoder_padding_mask'] is not None:
                 new_ref_out['encoder_padding_mask'] = ref_dict['encoder_padding_mask'].index_select(0, new_order)
 
+            # 复制 sim_scores (Batch)
             sim = ref_dict['sim_scores']
-            if isinstance(sim, list):
+            if isinstance(sim, list):  # 如果是list先转tensor
                 sim = torch.tensor(sim, device=new_order.device)
             if isinstance(sim, torch.Tensor) and sim is not None:
                 new_ref_out['sim_scores'] = sim.index_select(0, new_order)
 
+        # 3. 手动复制 Frag 数据
         new_frag_out = None
         if encoder_out.frag_out is not None:
             frag_dict = encoder_out.frag_out
@@ -125,8 +141,10 @@ class EditRetroEncoder(FairseqNATEncoder):
             if 'encoder_padding_mask' in frag_dict and frag_dict['encoder_padding_mask'] is not None:
                 new_frag_out['encoder_padding_mask'] = frag_dict['encoder_padding_mask'].index_select(0, new_order)
 
+            # 复制 frag_sim (Batch x 1)
             new_frag_out['frag_sim'] = frag_dict['frag_sim'].index_select(0, new_order)
 
+        # 4. 重新打包返回
         return EditRetroEncoderOut(
             encoder_out=temp_out.encoder_out,
             encoder_padding_mask=temp_out.encoder_padding_mask,
@@ -134,6 +152,7 @@ class EditRetroEncoder(FairseqNATEncoder):
             encoder_states=temp_out.encoder_states,
             src_tokens=temp_out.src_tokens,
             src_lengths=temp_out.src_lengths,
+            # 我们要的新字段
             ref_out=new_ref_out,
             frag_out=new_frag_out,
         )
@@ -143,26 +162,36 @@ class EditRetroEncoder(FairseqNATEncoder):
                 frag_tokens=None, frag_lengths=None,
                 sim_scores=None, **kwargs):
 
+        # 1. 编码主 Source
         encoder_out = super().forward(src_tokens, src_lengths, **kwargs)
+
+        # 2. 编码 Reference (共享权重)
         ref_out_dict = None
         if ref_tokens is not None and ref_lengths is not None:
+            # 复用父类的 forward
             ref_out = super().forward(ref_tokens, ref_lengths, **kwargs)
             ref_out_dict = {
                 'encoder_out': ref_out.encoder_out,
                 'encoder_padding_mask': ref_out.encoder_padding_mask,
-                'sim_scores': sim_scores
+                'sim_scores': sim_scores  # <--- 存这里，Decoder 才能拿到
             }
 
+        # 3. 编码 Fragment (共享权重) 并计算 Introspector Score
         frag_out_dict = None
         if frag_tokens is not None and frag_lengths is not None:
             frag_out = super().forward(frag_tokens, frag_lengths, **kwargs)
+            # 计算 Frag Sim (内省器)
+            # frag_out['encoder_out'] shape: [seq_len, batch, embed_dim]
+            # 我们需要对其进行 Average Pooling (注意处理 padding)
             x = frag_out.encoder_out.transpose(0, 1)  # [batch, seq, dim]
             x_avg = x.mean(dim=1)
+
+            # 通过 MLP 得到分数 [batch, 1]
             frag_sim = self.introspector(x_avg)
             frag_out_dict = {
                 'encoder_out': frag_out.encoder_out,
                 'encoder_padding_mask': frag_out.encoder_padding_mask,
-                'frag_sim': frag_sim
+                'frag_sim': frag_sim  # <--- 存这里，Decoder 才能拿到
             }
 
         return EditRetroEncoderOut(
@@ -172,12 +201,15 @@ class EditRetroEncoder(FairseqNATEncoder):
             encoder_states=encoder_out.encoder_states,
             src_tokens=encoder_out.src_tokens,
             src_lengths=encoder_out.src_lengths,
+            # 新字段
             ref_out=ref_out_dict,
             frag_out=frag_out_dict,
         )
 
 
-
+# ===========================================================================
+# 2. 自定义 Decoder Layer: 实现 RetroDKR 的三阶段注意力 (Src, Ref, Frag)
+# ===========================================================================
 class RetroNATDecoderLayer(TransformerDecoderLayer):
     def __init__(self, args, no_encoder_attn=False):
         super().__init__(args, no_encoder_attn)
@@ -186,6 +218,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
         self.dropout_module = nn.Dropout(args.dropout)  # 获取 dropout 模块
         self.activation_dropout_module = nn.Dropout(args.activation_dropout)  # <--- 加上这一行
 
+        # === 新增：Reference Attention ===
         self.ref_attn = MultiheadAttention(
             self.embed_dim,
             args.decoder_attention_heads,
@@ -196,6 +229,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
         )
         self.ref_layer_norm = LayerNorm(self.embed_dim)
 
+        # === 新增：Fragment Attention ===
         self.frag_attn = MultiheadAttention(
             self.embed_dim,
             args.decoder_attention_heads,
@@ -205,6 +239,12 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
             encoder_decoder_attention=True,
         )
         self.frag_layer_norm = LayerNorm(self.embed_dim)
+
+        if getattr(args, "zero_init_fusion", False):
+            nn.init.zeros_(self.ref_attn.out_proj.weight)
+            nn.init.zeros_(self.ref_attn.out_proj.bias)
+            nn.init.zeros_(self.frag_attn.out_proj.weight)
+            nn.init.zeros_(self.frag_attn.out_proj.bias)
 
     def forward(
             self,
@@ -219,7 +259,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
             ref_out=None,
             frag_out=None,
     ):
-        # 1. Self Attention
+        # 1. Self Attention (标准流程)
         residual = x
         x = self.self_attn_layer_norm(x)
         x, _ = self.self_attn(
@@ -233,10 +273,14 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
         x = self.dropout_module(x)
         x = residual + x
 
-        # 2. Reference Attention
+        # 2. Reference Attention (如果有 Ref)
         if ref_out is not None:
             residual = x
             x = self.ref_layer_norm(x)
+
+            # ref_out['encoder_out']: [seq, batch, dim]
+            # ref_out['encoder_padding_mask']: [batch, seq]
+            # ref_out['sim_scores']: [batch] (float list or tensor)
 
             ref_k = ref_out['encoder_out']
             ref_v = ref_out['encoder_out']
@@ -265,7 +309,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
             x = self.dropout_module(x)
             x = residual + x
 
-        # 3. Fragment Attention
+        # 3. Fragment Attention (如果有 Frag)
         if frag_out is not None:
             residual = x
             x = self.frag_layer_norm(x)
@@ -293,7 +337,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
             x = self.dropout_module(x)
             x = residual + x
 
-        # 4. Context Attention (Src Attention)
+        # 4. Context Attention (Src Attention) (标准流程)
         if self.encoder_attn is not None:
             residual = x
             x = self.encoder_attn_layer_norm(x)
@@ -309,7 +353,7 @@ class RetroNATDecoderLayer(TransformerDecoderLayer):
             x = self.dropout_module(x)
             x = residual + x
 
-        # 5. Feed Forward
+        # 5. Feed Forward (标准流程)
         residual = x
         x = self.final_layer_norm(x)
         x = self.activation_fn(self.fc1(x))
@@ -372,6 +416,12 @@ class EditRetroModel(FairseqNATModel):
             default=None,
             help="path to load pretrained model weights (for fine-tuning)"
         )
+        parser.add_argument(
+            "--zero-init-fusion",
+            action="store_true",
+            default=False,
+            help="Zero-initialize the output projection of ref/frag cross-attention layers",
+        )
 
     # === 重写 build_encoder ===
     @classmethod
@@ -390,6 +440,7 @@ class EditRetroModel(FairseqNATModel):
         decoder.alpha_ratio = getattr(args, "alpha_ratio", 0.5)
         return decoder
 
+    # === 重写 build_model 以支持部分参数加载 ===
     @classmethod
     def build_model(cls, args, task):
         """Build a new model instance."""
@@ -402,15 +453,22 @@ class EditRetroModel(FairseqNATModel):
             from fairseq import checkpoint_utils
             import logging
             logger = logging.getLogger(__name__)
+
             logger.info(f"Loading pretrained weights from {pretrained_path}...")
+
+            # 加载 Checkpoint 到 CPU
             state = checkpoint_utils.load_checkpoint_to_cpu(pretrained_path)
 
+            # 兼容处理：有的 ckpt 保存的是 {'model': ...}，有的是直接的 state_dict
             if "model" in state:
                 pretrained_state_dict = state["model"]
             else:
                 pretrained_state_dict = state
 
+            # 获取当前模型的 state_dict
             model_state_dict = model.state_dict()
+
+            # 过滤掉形状不匹配的参数（兼容 ref/frag attention 层）
             filtered_state_dict = {}
             for k, v in pretrained_state_dict.items():
                 if k in model_state_dict:
@@ -419,7 +477,27 @@ class EditRetroModel(FairseqNATModel):
                     else:
                         logger.warning(f"Skipping {k} due to shape mismatch: {v.shape} vs {model_state_dict[k].shape}")
 
+            # 加载参数，Strict=False 允许新加的层保持随机初始化
             model.load_state_dict(filtered_state_dict, strict=False)
+
+            # 计算未加载的键（新层 + 形状不匹配被跳过的层 + 名字不匹配的层）
+            # loaded_keys = set(filtered_state_dict.keys())
+            # model_keys = set(model_state_dict.keys())
+            # missing_keys = model_keys - loaded_keys
+            # if len(missing_keys) > 0:
+            #     logger.info(f"Total parameters: {len(model_keys)}, Loaded: {len(loaded_keys)}")
+            #     logger.info(f"The following parameters were NOT loaded (randomly initialized):")
+            #     for k in sorted(list(missing_keys)):
+            #         # 过滤掉一些无关紧要的统计量，只看权重
+            #         if "num_batches_tracked" not in k:
+            #             logger.info(f"  - {k}")
+            #
+            #             # 特别检查：如果是 Embeddings 没加载，必须报个大警告
+            #             if "embed_tokens" in k or "embed_positions" in k:
+            #                 logger.warning(
+            #                     f"!!! CRITICAL: Embedding layer {k} was NOT loaded! Check dictionary size match.")
+            # else:
+            #     logger.info("All parameters loaded successfully.")
 
         return model
 
@@ -427,7 +505,7 @@ class EditRetroModel(FairseqNATModel):
                 prev_output_tokens, tgt_tokens,
                 ref_tokens=None, ref_lengths=None,
                 frag_tokens=None, frag_lengths=None,
-                sim_scores=None,
+                sim_scores=None,  # 新增参数
                 **kwargs):
 
         assert tgt_tokens is not None, "forward function only supports training."
@@ -628,7 +706,6 @@ class EditRetroModel(FairseqNATModel):
             output_scores = _fill(output_scores, can_reposition_word, _scores,
                                   0)
             attn = _fill(attn, can_reposition_word, _attn, 0.)
-
             if history is not None:
                 history.append(output_tokens.clone())
 
@@ -683,7 +760,6 @@ class EditRetroModel(FairseqNATModel):
                                   self.pad)
             output_marks = _fill(output_marks, can_ins_mask, _marks, 0)
             output_scores = _fill(output_scores, can_ins_mask, _scores, 0)
-
             if history is not None:
                 history.append(output_tokens.clone())
 
@@ -1161,6 +1237,8 @@ class EditRetroDecoder(FairseqNATDecoder):
                          dictionary,
                          embed_tokens,
                          no_encoder_attn=no_encoder_attn)
+        # 1. 替换标准 Layer 为自定义 RetroNATDecoderLayer
+
         self.dictionary = dictionary
         self.bos = dictionary.bos()
         self.unk = dictionary.unk()
@@ -1211,6 +1289,7 @@ class EditRetroDecoder(FairseqNATDecoder):
                 - a dictionary with any model-specific outputs
             the EDITORTransformer decoder has full-attention to all generated tokens
         """
+
         # embed positions
         positions = (self.embed_positions(prev_output_tokens)
                      if self.embed_positions is not None else None)
@@ -1349,6 +1428,7 @@ def EditRetro_base_architecture(args):
     args.share_discriminator_maskpredictor = getattr(
         args, "share_discriminator_maskpredictor", False)
     args.no_share_last_layer = getattr(args, "no_share_last_layer", False)
+    args.zero_init_fusion = getattr(args, "zero_init_fusion", False)
 
 
 @register_model_architecture("editretro_nat", "editretro")  # TODO: architecture name
@@ -1393,7 +1473,7 @@ def EditRetro_full_architecture(args):
     args.share_discriminator_maskpredictor = getattr(
         args, "share_discriminator_maskpredictor", False)
     args.no_share_last_layer = getattr(args, "no_share_last_layer", False)
-
+    args.zero_init_fusion = getattr(args, "zero_init_fusion", False)
 
 @register_model_architecture("editretro_nat", "editretro_nat_50k")  # TODO: architecture name
 def EditRetro_small_architecture(args):
@@ -1434,3 +1514,4 @@ def EditRetro_small_architecture(args):
     args.share_discriminator_maskpredictor = getattr(
         args, "share_discriminator_maskpredictor", False)
     args.no_share_last_layer = getattr(args, "no_share_last_layer", False)
+    args.zero_init_fusion = getattr(args, "zero_init_fusion", False)

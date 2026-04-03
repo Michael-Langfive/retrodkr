@@ -1,19 +1,20 @@
 #!/bin/bash
 
 gpus='0'
-lr=0.0001
-max_tokens=16384
-warmup=4000
-update=1
-max_epoch=40
-max_update=100000
-keep_last_epochs=40
+lr=0.0003
+max_tokens=20480
+warmup=10000
+update=2
+max_epoch=1000
+max_update=1000000
+keep_last_epochs=10
 noise_type=random_delete_shuffle
 architecture=editretro_nat
 task=translation_retro
 loss=finetune_nat_loss
 
-exp_n=finetune_50k
+
+exp_n=finetune_full
 lambda1=1.0
 lambda2=2.0
 lambda3=0.43
@@ -26,9 +27,8 @@ mkdir -p ${exp_dir}
 model_dir=${exp_dir}/${run_n}/checkpoints
 mkdir -p ${model_dir}
 
-databin=datasets/USPTO_50K/aug20/data-bin
+databin=datasets/USPTO_FULL/aug5/data-bin
 
-### Point to the processed pretrained checkpoint
 ckpt_name=ckpt/pretrain.pt   #TODO: point to the pretrain checkpoint path
 
 gpu_ids=$(echo $gpus | sed "s/,/ /g")
@@ -39,29 +39,30 @@ CUDA_VISIBLE_DEVICES=$gpus CUDA_LAUNCH_BLOCKING=1 fairseq-train \
   --user-dir editretro \
 	-s src \
 	-t tgt \
-  -r ref \
+	-r ref \
   -f frag \
-  --sim-lang sim\
+  --sim-lang sim \
   --lambda1 ${lambda1} \
   --lambda2 ${lambda2} \
   --lambda3 ${lambda3} \
-  --save-dir ${model_dir} \
+	--save-dir ${model_dir} \
 	--ddp-backend=no_c10d \
 	--task ${task} \
 	--criterion ${loss} \
 	--arch ${architecture} \
 	--noise ${noise_type} \
 	--optimizer adam --adam-betas '(0.9,0.98)' \
-	--lr ${lr} --lr-scheduler inverse_sqrt --min-lr '1e-09' \
-	--warmup-updates ${warmup} --warmup-init-lr '1e-07' \
+	--lr ${lr} --lr-scheduler inverse_sqrt \
+	--min-lr '1e-09' --warmup-updates ${warmup} \
+	--warmup-init-lr '1e-07' \
 	--label-smoothing 0.1 \
-	--dropout 0.2 --attention-dropout 0.2 \
+	--dropout 0.1 --attention-dropout 0.1 \
 	--weight-decay 0.01 \
 	--share-all-embeddings \
 	--decoder-learned-pos --encoder-learned-pos \
 	--max-tokens-valid 4000 \
 	--log-format 'simple' \
-	--log-interval 200 \
+	--log-interval 500 \
 	--fixed-validation-seed 7 \
 	--max-tokens ${max_tokens} \
 	--keep-last-epochs ${keep_last_epochs} \
@@ -70,7 +71,10 @@ CUDA_VISIBLE_DEVICES=$gpus CUDA_LAUNCH_BLOCKING=1 fairseq-train \
 	--alpha-ratio 0.5 \
 	--dae-ratio 0.5 \
 	--fp16  \
+	--clip-norm 1.0 \
+	--zero-init-fusion \
 	--update-freq ${update} \
-	--reset-optimizer --reset-lr-scheduler --reset-meters --reset-dataloader \
+	--save-interval-updates 10000 \
 	--pretrained-ckpt ${ckpt_name} \
-	--distributed-world-size ${gpu_n} > ${model_dir}/finetune_50k.log
+	--reset-optimizer --reset-lr-scheduler --reset-meters --reset-dataloader \
+	--distributed-world-size ${gpu_n} > ${model_dir}/finetune_full.log

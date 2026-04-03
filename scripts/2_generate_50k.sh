@@ -17,20 +17,20 @@ outfile=generation
 output_dir=${root_dir}/generations/${exp_n}
 mkdir -p ${output_dir}
 
+# If you are using our provided checkpoint, replace ckpt_path with the path to your specific checkpoint.
+ckpt_path=xxxxxx/checkpoint_50k.pt
 
-#ckpt_path=${root_dir}/${exp_n}/checkpoints/checkpoint_best.pt
+####!!! If you fintune the model yourself, uncomment the following codes to process the checkpoints.
+# model_dir=${root_dir}/${exp_n}/checkpoints
+# ckpt_name=finetune.pt
+# ckpt_path=${model_dir}/${ckpt_name}
+####!!!TODO: average multiple (dozens of) checkpoints to get better performance
+# python ./utils/average_checkpoints.py --inputs ${model_dir} \
+#     --output ${ckpt_path} \
+#     --num-epoch-checkpoints 40 \
+# 	--checkpoint-upper-bound 40 \
 
-###!!! If you fintune the model yourself, uncomment the following codes to process the checkpoints.
- model_dir=${root_dir}/${exp_n}/checkpoints
- ckpt_name=finetune.pt
- ckpt_path=${model_dir}/${ckpt_name}
-###!!!TODO: average multiple (dozens of) checkpoints to get better performance
- python ./utils/average_checkpoints.py --inputs ${model_dir} \
-     --output ${ckpt_path} \
-     --num-epoch-checkpoints 40 \
- 	--checkpoint-upper-bound 40 \
-
-CUDA_VISIBLE_DEVICES=$gpus fairseq-generate \
+CUDA_VISIBLE_DEVICES=$gpus CUDA_LAUNCH_BLOCKING=1 fairseq-generate \
 	--user-dir editretro \
 	$databin \
 	-s src -t tgt \
@@ -63,7 +63,6 @@ grep ^H ${output_dir}/${outfile}.txt | LC_ALL=C sort -V | cut -f3- > ${output_di
 grep ^P ${output_dir}/${outfile}.txt | LC_ALL=C sort -V | cut -f2- > ${output_dir}/${prob}
 
 
-#生成json文件 对应关系
 python ./utils/post_process.py \
     -generate_path  ${output_dir}/${pred} \
     -prob_path ${output_dir}/${prob} \
