@@ -246,11 +246,9 @@ class EditRetroTask(TranslationTask):
         w3 = getattr(self.args, 'lambda3', 0.0)
         full_net_input = sample['net_input'].copy()
 
-        # 定义一个辅助函数来处理日志累加，避免代码重复
         def accumulate_logging_output(agg_log, current_log, weight):
             if current_log is None:
                 return
-            # 累加 Loss (加权)
             agg_log['loss'] += current_log.get('loss', 0) * weight
             agg_log['nll_loss'] += current_log.get('nll_loss', 0) * weight
 
@@ -273,7 +271,6 @@ class EditRetroTask(TranslationTask):
         # Branch 2: Ref Context (Src + Ref)
         # =======================================================
         if w2 > 0 and full_net_input.get('ref_tokens') is not None:
-            # 恢复 Ref, 保持 Frag 为 None
             sample['net_input']['ref_tokens'] = full_net_input['ref_tokens']
             sample['net_input']['ref_lengths'] = full_net_input['ref_lengths']
             sample['net_input']['sim_scores'] = full_net_input.get('sim_scores')
@@ -287,11 +284,9 @@ class EditRetroTask(TranslationTask):
         # Branch 3: Frag Context (Src + Frag)
         # =======================================================
         if w3 > 0 and full_net_input.get('frag_tokens') is not None:
-            # 屏蔽 Ref
             sample['net_input']['ref_tokens'] = None
             sample['net_input']['ref_lengths'] = None
             sample['net_input']['sim_scores'] = None
-            # 恢复 Frag
             sample['net_input']['frag_tokens'] = full_net_input['frag_tokens']
             sample['net_input']['frag_lengths'] = full_net_input['frag_lengths']
 
